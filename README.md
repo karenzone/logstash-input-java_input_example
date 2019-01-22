@@ -8,9 +8,8 @@ It is fully free and fully open source. The license is Apache 2.0, meaning you a
 
 ## How to write a Java input
 
-> <b>IMPORTANT NOTE:</b> Native support for Java plugins in Logstash is in the experimental phase. While unnecessary
-changes will be avoided, anything may change in future phases. See the ongoing work on the 
-[beta phase](https://github.com/elastic/logstash/pull/10232) of Java plugin support for the most up-to-date status.
+> <b>IMPORTANT NOTE:</b> Native support for Java plugins in Logstash is in the beta phase. While no API changes are
+anticipated, some changes may be necessary before GA.
 
 ### Overview 
 
@@ -19,7 +18,7 @@ Native support for Java plugins in Logstash consists of several components inclu
 * APIs for developing Java plugins. The APIs are in the `co.elastic.logstash.api` package. If a Java plugin 
 references any classes or specific concrete implementations of API interfaces outside that package, breakage may 
 occur because the implementation of classes outside of the API package may change at any time.
-* Tooling to automate the packaging and deployment of Java plugins in Logstash [not complete as of the experimental phase]
+* Tooling to automate the packaging and deployment of Java plugins in Logstash [not complete as of the beta phase]
 
 To develop a new Java input for Logstash, you write a new Java class that conforms to the Logstash Java Input
 API, package it, and install it with the `logstash-plugin` utility. We'll go through each of those steps in this guide.
@@ -36,28 +35,30 @@ example input:
 public class JavaInputExample implements Input {
 
     public static final PluginConfigSpec<Long> EVENT_COUNT_CONFIG =
-            Configuration.numSetting("count", 3);
+            PluginConfigSpec.numSetting("count", 3);
 
     public static final PluginConfigSpec<String> PREFIX_CONFIG =
-            Configuration.stringSetting("prefix", "message");
+            PluginConfigSpec.stringSetting("prefix", "message");
 
+    private String id;
     private long count;
     private String prefix;
     private final CountDownLatch done = new CountDownLatch(1);
     private volatile boolean stopped;
 
-    public JavaInputExample(Configuration config, Context context) {
+    public JavaInputExample(String id, Configuration config, Context context) {
+        this.id = id;
         count = config.get(EVENT_COUNT_CONFIG);
         prefix = config.get(PREFIX_CONFIG);
     }
 
     @Override
-    public void start(QueueWriter queueWriter) {
+    public void start(Consumer<Map<String, Object>> consumer) {
         int eventCount = 0;
         try {
             while (!stopped && eventCount < count) {
                 eventCount++;
-                queueWriter.push(Collections.singletonMap("message",
+                consumer.accept(Collections.singletonMap("message",
                         prefix + " " + StringUtils.center(eventCount + " of " + count, 20)));
             }
         } finally {
@@ -80,6 +81,11 @@ public class JavaInputExample implements Input {
     public Collection<PluginConfigSpec<?>> configSchema() {
         return Arrays.asList(EVENT_COUNT_CONFIG, PREFIX_CONFIG);
     }
+
+    @Override
+    public String getId() {
+        return this.id;
+    }
 }
 ```
 
@@ -96,17 +102,17 @@ There are two things to note about the class declaration:
    in the Logstash pipeline definition. For example, this input would be referenced in the input section of the
    Logstash pipeline defintion as `input { java_input_example => { .... } }`
   * The value of the `name` property must match the name of the class excluding casing and underscores.
-* The class must implement the `co.elastic.logstash.api.v0.Input` interface.
+* The class must implement the `co.elastic.logstash.api.Input` interface.
 
 #### Plugin settings
 
 The snippet below contains both the setting definition and the method referencing it:
 ```java
 public static final PluginConfigSpec<Long> EVENT_COUNT_CONFIG =
-        Configuration.numSetting("count", 3);
+        PluginConfigSpec.numSetting("count", 3);
 
 public static final PluginConfigSpec<String> PREFIX_CONFIG =
-        Configuration.stringSetting("prefix", "message");
+        PluginConfigSpec.stringSetting("prefix", "message");
 
 @Override
 public Collection<PluginConfigSpec<?>> configSchema() {
@@ -125,17 +131,19 @@ no unsupported settings are present.
 
 #### Constructor and initialization
 ```java
+private String id;
 private long count;
 private String prefix;
 
-public JavaInputExample(Configuration config, Context context) {
+public JavaInputExample(String id, Configuration config, Context context) {
+    this.id = id;
     count = config.get(EVENT_COUNT_CONFIG);
     prefix = config.get(PREFIX_CONFIG);
 }
 ```
-All Java input plugins must have a constructor taking both a `Configuration` and `Context` argument. This is the
-constructor that will be used to instantiate them at runtime. The retrieval and validation of all plugin settings
-should occur in this constructor. In this example, the values of the two plugin settings are retrieved and
+All Java input plugins must have a constructor taking a `String` id and `Configuration` and `Context` argument. This
+is the constructor that will be used to instantiate them at runtime. The retrieval and validation of all plugin 
+settings should occur in this constructor. In this example, the values of the two plugin settings are retrieved and
 stored in local variables for later use in the `start` method. 
 
 Any additional initialization may occur in the constructor as well. If there are any unrecoverable errors encountered
@@ -145,12 +153,12 @@ will be logged and will prevent Logstash from starting.
 #### Start method
 ```java
 @Override
-public void start(QueueWriter queueWriter) {
+public void start(Consumer<Map<String, Object>> consumer) {
     int eventCount = 0;
     try {
         while (!stopped && eventCount < count) {
             eventCount++;
-            queueWriter.push(Collections.singletonMap("message",
+            consumer.accept(Collections.singletonMap("message",
                     prefix + " " + StringUtils.center(eventCount + " of " + count, 20)));
         }
     } finally {
@@ -172,7 +180,7 @@ the `stop` method. If the input produces a finite stream of events, this method 
 event in the stream is produced or a stop request is made, whichever comes first.
 
 Events should be constructed as instances of `Map<String, Object>` and pushed into the event pipeline via the
-`QueueWriter.push()` method. 
+`Consumer<Map<String, Object>>.accept()` method. 
 
 #### Stop and awaitStop methods
 
@@ -197,6 +205,17 @@ Inputs stop both asynchronously and cooperatively. Use the `awaitStop` method to
 completed the stop process. Note that this method should **not** signal the input to stop as the `stop` method 
 does. The awaitStop mechanism may be implemented in any way that honors the API contract though a `CountDownLatch`
 works well for many use cases.
+
+#### getId method
+
+```java
+@Override
+public String getId() {
+    return id;
+}
+```
+For input plugins, the `getId` method should always return the id that was provided to the plugin through its
+constructor at instantiation time.
 
 #### Unit tests
 Lastly, but certainly not least importantly, unit tests are strongly encouraged. The example input plugin includes
@@ -227,7 +246,7 @@ future phase of the Java plugin support project, these Ruby source files will be
 ```
 Gem::Specification.new do |s|
   s.name            = 'logstash-input-java_input_example'
-  s.version         = '0.0.1'
+  s.version         = PLUGIN_VERSION
   s.licenses        = ['Apache-2.0']
   s.summary         = "Example input using Java plugin API"
   s.description     = ""
@@ -249,8 +268,9 @@ Gem::Specification.new do |s|
   s.add_development_dependency 'logstash-devutils'
 end
 ```
-The above file can be used unmodified except that `s.name` must follow the `logstash-input-<input-name>` pattern
-and `s.version` must match the `project.version` specified in the `build.gradle` file.
+The above file can be used unmodified except that `s.name` must follow the `logstash-input-<input-name>` pattern.
+Also, `s.version` must match the `project.version` specified in the `build.gradle` file though those both should
+be read from the `VERSION` file in this example.
 
 `lib/logstash/inputs/<input-name>.rb`
 ```
